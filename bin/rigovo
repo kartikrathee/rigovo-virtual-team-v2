@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+RIGOVO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec bun run --conditions=browser "$RIGOVO_ROOT/packages/rigovo/src/main.ts" "$@"

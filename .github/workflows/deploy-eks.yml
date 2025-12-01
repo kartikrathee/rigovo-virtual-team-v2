@@ -1,0 +1,71 @@
+name: Deploy coding agent to EKS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eks-production
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/rigovo.yml
+  deploy:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      EKS_CLUSTER: ${{ vars.EKS_CLUSTER }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      KUBECTL_VERSION: ${{ vars.KUBECTL_VERSION }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Validate deployment configuration
+        run: |
+          set -euo pipefail
+          for key in AWS_REGION EKS_CLUSTER ECR_REPOSITORY AWS_ROLE_ARN KUBECTL_VERSION; do
+            test -n "${!key}" || { echo "Missing production variable: $key"; exit 1; }
+          done
+          [[ "$KUBECTL_VERSION" =~ ^v1\.[0-9]+\.[0-9]+$ ]]
+      - name: Authenticate to AWS with OIDC
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Install cluster-compatible kubectl
+        run: |
+          set -euo pipefail
+          curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          curl -fsSLo kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl.sha256"
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+          sudo install -m 0755 kubectl /usr/local/bin/kubectl
+      - name: Build and publish immutable image
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          registry="${account}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          aws ecr get-login-password | docker login --username AWS --password-stdin "$registry"
+          image="${registry}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          docker build --platform linux/amd64 -f deploy/Dockerfile -t "$image" .
+          docker run --rm "$image" --version
+          docker push "$image"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Deploy and verify rollout
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_REGION"
+          kubectl -n coding-agent get secret agent-runtime >/dev/null
+          cp -R deploy/eks "$RUNNER_TEMP/eks"
+          printf '\n' >> "$RUNNER_TEMP/eks/kustomization.yaml"
+          sed -i "s|newName: coding-agent|newName: ${IMAGE%:*}|; s|newTag: local|newTag: ${GITHUB_SHA}|" "$RUNNER_TEMP/eks/kustomization.yaml"
+          kubectl apply -k "$RUNNER_TEMP/eks"
+          kubectl -n coding-agent rollout status deployment/coding-agent --timeout=10m

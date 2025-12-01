@@ -1,0 +1,58 @@
+name: Rigovo checks
+
+on:
+  push:
+    branches: [opencode-rewrite, main, dev]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  HUSKY: "0"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: ./.github/actions/setup-bun
+        with:
+          install-flags: --frozen-lockfile
+      - name: Check Rigovo types and project memory
+        working-directory: packages/rigovo
+        run: |
+          bun typecheck
+          bun test test
+      - name: Check upstream execution behavior
+        working-directory: packages/opencode
+        run: |
+          bun typecheck
+          bun test test/session/retry.test.ts test/session/compaction.test.ts test/session/overflow.test.ts test/tool/task.test.ts test/tool/task-workers.test.ts test/tool/registry.test.ts --timeout 30000
+      - name: Render Kubernetes manifests
+        run: kubectl kustomize deploy/eks > /tmp/agent-manifest.yaml
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Build deployment image
+        run: docker build -f deploy/Dockerfile -t coding-agent:check .
+      - name: Verify launcher and authenticated health endpoint
+        run: |
+          set -euo pipefail
+          docker run --rm coding-agent:check --version
+          docker run -d --name agent-check -e OPENCODE_SERVER_PASSWORD=ci-health-check coding-agent:check
+          trap 'docker logs agent-check; docker rm -f agent-check' EXIT
+          for _attempt in $(seq 1 60); do
+            if docker exec agent-check bun -e '
+              const response = await fetch("http://127.0.0.1:4096/api/health", {
+                headers: { Authorization: "Basic " + btoa("opencode:ci-health-check") },
+              });
+              if (!response.ok || !(await response.json()).healthy) process.exit(1);
+            '; then exit 0; fi
+            sleep 2
+          done
+          exit 1
