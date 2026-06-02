@@ -1,0 +1,19 @@
+{
+  "name": "@rigovo/cli",
+  "version": "2.0.0-alpha.1",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun src/main.ts",
+    "test": "bun test test",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "workspace:*",
+    "@opentui/solid": "catalog:"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "@typescript/native-preview": "catalog:"
+  }
+}
